@@ -1,0 +1,585 @@
+---
+title: "期末專案--行銷策略"
+author: "G14"
+date: "`r Sys.time()`"
+output:
+  html_document:
+    highlight: pygments
+    theme: flatly
+    css: ../etc/style.css
+---
+
+<br>
+```{r echo=T, message=F, cache=F, warning=F}
+rm(list=ls(all=T))
+library(d3heatmap)
+pacman::p_load(latex2exp,Matrix,dplyr,tidyr,ggplot2,caTools,plotly,magrittr, readr, vcd)
+load("final_data/tf4.rdata")#回購機率、客單價
+```
+<br>
+
+### 1. 資料處理
+<br>
+
+##### 讀進資料
+```{r}
+TA = read_csv("data/ta_feng_all_months_merged.csv") %>% 
+  data.frame %>% setNames(c(
+    "date","cust","age","area","cat","prod","qty","cost","price"))
+```
+<br>
+
+##### 日期格式轉換
+```{r fig.height=3.2, fig.width=7}
+TA$date = as.Date(TA$date, format="%m/%d/%Y")
+```
+<br>
+
+##### 年齡層級、郵遞區號
+```{r}
+age.group = c("<25","25-29","30-34","35-39","40-44",
+              "45-49","50-54","55-59","60-64",">65") # 將年齡分類
+TA$age = c(paste0("a",seq(24,69,5)),"a99")[match(TA$age,age.group,11)] # seq函數將年齡24-69歲以5歲間隔產生 
+#paste0函數將a與數字合併 match函數：匹配两个向量，返回Z$age在age.gropu的位置。
+TA$area = paste0("z",TA$area)
+```
+<br>
+
+```{r fig.height=2.5, fig.width=7}
+par(mfrow=c(1,2),cex=0.7)
+table(TA$age, useNA='ifany') %>% barplot(main="Age Groups", las=2) #useNa = >將NA視為有效類別
+table(TA$area,useNA='ifany') %>% barplot(main="Areas", las=2)
+```
+<br>
+
+##### 處理離群值
+```{r}
+# Quantile of Variables
+sapply(TA[,7:9], quantile, prob=c(.99, .999, .9995))
+```
+
+```{r}
+# Remove Outliers
+TA = subset(TA, qty<=24 & cost<=3800 & price<=4000) 
+```
+<br>
+
+##### 彙總訂單 Assign Transaction ID
+把每一天、每一位顧客的交易項目彙總為一張訂單
+```{r}
+TA$tid = group_indices(TA, date, cust) # same customer same day
+```
+<br>
+
+##### 資料總覽
+```{r}
+# No. cust, cat, prod, tid
+sapply(TA[c("cust","cat","prod","tid")], n_distinct)
+```
+<br><hr>
+
+### 2. 交易計錄：`TRA`
+<br>
+
+##### 交易資料彙整
+```{r}
+TRA = TA %>% group_by(tid) %>% summarise(
+  date = min(date),          # 交易日期  
+  cust = min(cust),          # 顧客 ID
+  age = min(age),            # 顧客 年齡級別
+  area = min(area),          # 顧客 居住區別
+  items = n(),               # 交易項目(總)數
+  pieces = sum(qty),         # 產品(總)件數
+  total = sum(price),        # 交易(總)金額
+  gross = sum(price - cost)  # 毛利
+) %>% data.frame
+```
+<br>
+
+##### 處理離群值
+```{r}
+# Check Quantile & Remove Outliers
+sapply(TRA[,6:9], quantile, prob=c(.999, .9995, .9999))
+```
+
+```{r}
+# Remove Outliers
+TRA = subset(TRA, items<=62 & pieces<95 & total<16000) # 119328
+```
+<br>
+
+##### 交易摘要
+```{r}
+summary(TRA)    
+```
+<br><hr>
+
+### 3. 顧客資料：`C`
+<br>
+
+##### 顧客資料彙整
+```{r}
+d0 = max(TRA$date) + 1
+C = TRA %>% mutate(
+  days = as.integer(difftime(d0, date, units="days"))# 新增欄位days為每張訂單的交易日期和資料的最後一天差幾天
+  ) %>% group_by(cust) %>% summarise(
+    r = min(days),      # recency
+    s = max(days),      # seniority
+    f = n(),            # frquency
+    m = mean(total),    # monetary
+    rev = sum(total),   # total revenue contribution
+    raw = sum(gross),   # total gross profit contribution
+    age = min(age),     # age group
+    area = min(area),   # area code
+  ) %>% data.frame      
+```
+<br>
+
+##### Check & Save
+```{r}
+is.na(TA) %>% colSums
+```
+
+```{r}
+is.na(TRA) %>% colSums
+```
+
+```{r}
+is.na(C) %>% colSums
+```
+<br><hr>
+
+### 一、整體顧客分析
+<br>
+
+##### 整體顧客地理位置分布
+```{r}
+tapply(C$rev,C$area,sum) %>% prop.table() %>% barplot()
+#從獲利貢獻圖中發現，z115、z221兩個地區就貢獻大部分的營收(65%)
+```
+<br>
+
+##### 整體顧客年齡分布
+```{r}
+tapply(C$rev,C$age,sum) %>% prop.table() %>% barplot() #30歲到49歲為主力顧客
+```
+<br>
+
+### 二、南港、汐止顧客分析
+<br>
+
+##### 兩地區交易時間分析
+```{r}
+TA_RR <- TA %>% filter(area =="z115" | area =="z221")
+#根據115.221兩地區交易時間進行分析 可以看出該兩區交易熱點集中於1-2月 
+TA_RR %>%
+  group_by(area, date) %>%
+  summarize(num_tran = n()) %>% 
+  ggplot(aes(x = date, y = num_tran)) + 
+  geom_bar(aes(x = date, y = num_tran, color = area), stat = "identity", alpha = 0.8) +
+  facet_wrap(~area) + 
+  labs(y = "# Transactions", x = "Date")
+```
+<br>
+
+##### 兩地區各年齡層週間消費情況
+```{r}
+TRA$wday = format(TRA$date, "%u")
+TRA_R = TRA %>% filter(area=="z115" | area == "z221")
+MOSA = function(formula, data) mosaic(formula, data, shade=T, 
+  margins=c(0,1,0,0), labeling_args = list(rot_labels=c(90,0,0,0)),
+  gp_labels=gpar(fontsize=9), legend_args=list(fontsize=9),
+  gp_text=gpar(fontsize=7),labeling=labeling_residuals)#
+MOSA(~wday+age, TRA_R) 
+#29歲以下與50歲以上較常在平日消費，30~49歲則喜歡在週末消費。
+```
+<br>
+
+### 三、顧客分群
+<br>
+
+##### 兩地區的顧客從顧客購買習慣做分群(freq,recent,senior,money)
+```{r}
+CR <- C %>% filter(area =="z115" | area =="z221")
+set.seed(111)
+CR$grp = kmeans(scale(CR[,c(2,3,4,5)]),4)$cluster #分成5群 ，以r,f,m,rev為變數
+table(CR$grp)  # 族群大小
+#集群式分析k-means
+```
+<br>
+
+##### CR資料標準化
+```{r}
+CN = scale(CR[c(2:7)]) %>% data.frame
+sapply(split(CN,CR$grp), colMeans) %>% round(2) 
+```
+<br>
+
+##### 四群顧客直條圖分佈
+```{r}
+par(cex=0.8)
+split(CN,CR$grp) %>% sapply(colMeans) %>% barplot(beside=T,col=rainbow(6))
+legend('topright',legend=colnames(CN),fill=rainbow(6))
+```
+<br>
+
+##### 泡泡圖呈現
+```{r}
+group_by(CR,grp) %>% summarise(
+  recent=mean(r),
+  senior=mean(s),
+  freq=mean(f),
+  avg.Revenue = sum(f*m)/sum(f),
+  money=round(mean(m), digits=0),
+  size=n(),
+  revenue=mean(rev)) %>% 
+  ggplot(aes(x=avg.Revenue, y=freq)) +
+  geom_point(aes(size=revenue, col=recent),alpha=0.5) +
+  scale_size(range=c(4,30)) +
+  scale_color_gradient(low="green",high="red") +
+  geom_text(aes(label = size ),size=3) +
+  theme_bw() + guides(size=F) +
+  labs(title="Customer Segements",
+       subtitle="(bubble_size:revenue_contribution; text:group_size)",
+       color="recent") +
+  xlab("money") + ylab("freq")
+#泡泡圖的數字代表該族群人數，泡泡大小代表群中每個人的平均營收貢獻，Ｘ軸代表平均客單價，Y軸代表光顧商店的頻率。
+```
+<br>
+
+### 四、各客群購物分析
+<br>
+
+##### 馬賽克圖呈現族群年齡分佈
+```{r}
+MOSA(~grp+age, CR) #第一族群大多落在34-44歲之間，第二、三族群29歲以下年輕人比例較高，第四族群老年人比例較高。
+```
+<br>
+
+##### 族群週間消費情況
+```{r}
+CR_grp = CR[c(1,10)]
+TRA_M_C <- merge(TRA_R,CR_grp,by="cust",all = T)
+MOSA(~grp+wday, TRA_M_C)#從族群和消費習慣的相關性我們可以發現壯年人口習慣在假日購物，老年人則習慣在平日購物。
+```
+<br>
+
+##### 顧客消費產品類型分析
+<br>
+
+##### 各族群在商店十大熱銷商品的消費情況
+```{r fig.height=6, fig.width=8}
+top10 = tapply(TA$qty,TA$cat,sum) %>% sort %>% tail(10) %>% names
+TA_R = TA %>% filter(area=="z115" | area == "z221")
+TA_M_C <- merge(TA_R,CR_grp,by="cust",all = T)
+MOSA(~grp+cat, TA_M_C[TA_M_C$cat %in% top10,])
+#我們發現有集中消費某幾樣商品的趨勢,因此我們在後面的客群購物分析中,將會針對這些族群偏好的商品進行個別分析及策略擬定。
+```
+<br>
+
+##### 商店最熱銷五大商品在週間銷售情況
+```{r}
+top5 = tapply(TA$qty,TA$cat,sum) %>% sort %>% tail(5) %>% names
+TA_top5 <- filter(TA, cat %in% top5)
+table(TA_top5$cat , format(TA_top5$date, "%u")) %>%
+  {./rowSums(.)} %>%
+  as.data.frame.matrix() %>%
+  d3heatmap(F,F, col = colorRamp(c("seagreen", "lightyellow", "red")))#熱門商品的銷售均集中於星期日
+```
+<br>
+
+##### 資料彙整
+```{r fig.height=4, fig.width=10}
+TA_M_C$gross = TA_M_C$price-TA_M_C$cost
+TA_M_C$margin = TA_M_C$gross/TA_M_C$price
+```
+
+```{r fig.height=4, fig.width=8}
+grp1 <- TA_M_C %>% filter(grp == 1) 
+top5_grp1 = tapply(grp1$margin,grp1$cat,sum) %>% sort %>% tail(5) %>% names()
+grp1 = grp1 %>% filter(cat %in% top5_grp1) 
+grp2 <- TA_M_C %>% filter(grp == 2) 
+top5_grp2 = tapply(grp2$qty,grp2$cat,sum) %>% sort %>% tail(5) %>% names()
+grp2 = grp2 %>% filter(cat %in% top5_grp2) 
+```
+
+```{r fig.height=4, fig.width=8}
+grp3 <- TA_M_C %>% filter(grp == 3) 
+top5_grp3 = tapply(grp3$qty,grp3$cat,sum) %>% sort %>% tail(5) %>% names()
+grp3 = grp3 %>% filter(cat %in% top5_grp3) 
+grp4 <- TA_M_C %>% filter(grp == 4) 
+top5_grp4 = tapply(grp4$qty,grp4$cat,sum) %>% sort %>% tail(5) %>% names()
+grp4 = grp4 %>% filter(cat %in% top5_grp4) 
+```
+<br>
+
+##### 各品類統整
+```{r}
+G = TA %>% group_by(cat) %>% summarise(
+  cat = min(cat),
+  qty = sum(qty),
+  avgprice = mean(price),
+  totalrev = sum(price),
+  gross = sum(price-cost),
+  margin = gross/totalrev
+) %>% data.frame
+```
+<br>
+
+##### 各族群購買數量最多的前五大商品，其商品營收、毛利分析
+```{r}
+G %>% filter(cat %in% top5_grp1) 
+G %>% filter(cat %in% top5_grp2)
+G %>% filter(cat %in% top5_grp3)
+G %>% filter(cat %in% top5_grp4) 
+```
+<br>
+
+##### 資料處理
+```{r}
+BR <- B %>% filter(area =="z115" | area =="z221")
+CR <- CR %>% filter(CR$cust %in% BR$cust)
+```
+
+```{r}
+CR_grp = CR[c(1,10)]
+BR <- merge(BR,CR_grp,by="cust",all = T)
+TA_M_C = TA_M_C %>% filter(TA_M_C$cust %in% BR$cust)
+B1 = BR %>% filter(BR$grp == 1)
+B2 = BR %>% filter(BR$grp == 2)
+B3 = BR %>% filter(BR$grp == 3)
+B4 = BR %>% filter(BR$grp == 4)
+```
+<br>
+
+##### 泡泡圖呈現各族群預期購買金額及回購機率
+```{r warning=F, fig.height=8, fig.width=8}
+group_by(BR,grp) %>% 
+  summarise(n=n(), Buy=mean(Buy), Rev=mean(Rev)) %>% 
+  ggplot(aes(Buy,Rev,size=n,label=grp)) + 
+  geom_point(alpha=0.5,color='gold') + 
+  geom_text(size=4) +
+  scale_size(range=c(4,20)) + theme_bw()  -> p
+ggplotly(p)
+```
+<br>
+
+##### 各族群毛利率
+```{r}
+group_by(TA_M_C, grp) %>% summarise(1-sum(cost)/sum(price) )
+```
+##### 定義效用函數
+```{r fig.height=3}
+DP = function(x,m0,b0,a0) {m0*plogis((10/a0)*(x-b0))}
+DR = function(x,m1,b1,a1) {m1*plogis((10/a1)*(x-b1))}
+```
+<br>
+
+### 五、行銷策略
+<br>
+
+### 上班族(第一群顧客)
+```{r warning=F, fig.height=8, fig.width=8}
+margin = 0.17
+mm=c(0.25, 0.3, 0.35)
+bb=c(50 ,  55,  60)
+aa=c( 30,  35,  40 )
+X = seq(50,200, 1)
+i=1;
+eR1_sum = sum(B1$Buy*B1$Rev) *margin
+
+df = do.call(rbind, lapply(1:length(mm), function(i) {
+  sapply(X, function(x) {
+    dp = pmin(1-B1$Buy, DP(x,mm[i],bb[i],aa[i]))
+    eR0 = B1$Buy * B1$Rev
+    eR1 = (B1$Buy+dp) * (B1$Rev)
+    eR = (eR1 - eR0)*margin - x*(B1$Buy+dp)
+    c(i=i, x=x, eR.ALL=sum(eR), N=sum(eR>0), eR.SEL=sum(eR[eR > 0]) )
+    }) %>% t %>% data.frame
+  }))
+df %>% 
+  mutate_at(vars(eR.ALL, eR.SEL), function(y) round(y/1000)) %>% 
+  gather('key','value',-i,-x) %>% 
+  mutate(Instrument = paste0('I',i)) %>%
+  ggplot(aes(x=x, y=value, col=Instrument)) + 
+  geom_hline(yintercept=0, linetype='dashed', col='blue') +
+  geom_line(size=1.5,alpha=0.5) + 
+  xlab('工具選項(成本)') + ylab('預期報償(K)') + 
+  ggtitle('行銷工具優化','假設行銷工具的效果是其成本的函數') +
+    facet_wrap(~key,ncol=1,scales='free_y') + theme_bw() -> p
+
+plotly::ggplotly(p)
+```
+<br>
+
+##### 成本效益總覽
+```{r}
+df$cost =df$x*df$N
+group_by(df, i) %>% top_n(1,eR.SEL)
+```
+<br>
+
+##### 最佳參數設定
+```{r}
+m=0.35; b=60; a=40; X = seq(40,150,1)
+eR1_sum = sum(B1$Buy*B1$Rev) *margin
+df = sapply(X, function(x) {
+  dp = pmin(DP(x,m,b,a),1-B1$Buy)
+  eR0 = B1$Buy * B1$Rev
+  eR1 = (B1$Buy+dp) * (B1$Rev)
+  eR = (eR1 - eR0)*margin - x*(B1$Buy+dp)
+  c(x=x,eReturn=sum(eR))
+  }) %>% t %>% data.frame %>% 
+  gather('key','value',-x)
+
+df %>% ggplot(aes(x=x, y=value, col=key)) + 
+  geom_hline(yintercept=0,linetype='dashed') +
+  geom_line(size=1.5,alpha=0.5) + 
+  facet_wrap(~key,ncol=1,scales='free_y') + theme_bw()
+```
+<br>
+
+### 小資族(第三群顧客)
+<br>
+
+##### 比較不同行銷工具的淨預期報酬
+```{r warning=F, fig.height=8, fig.width=8}
+mm=c(0.15, 0.2, 0.3)
+bb=c(  20,  25,   30)
+aa=c(  15,   15,  20) 
+mm1=c(0.27, 0.2, 0.06)
+bb1=c(  30,  15,   8)
+aa1=c(  10,   5,  5) 
+X = seq(0,120,1) 
+margin = 0.151
+i=1;
+eR3_sum = sum(B3$Buy*B3$Rev) *margin
+df = do.call(rbind, lapply(1:length(mm), function(i) {
+  sapply(X, function(x) {
+    dp = pmin(1-B3$Buy, DP(x,mm[i],bb[i],aa[i]))
+    dr = DR(x,mm1[i],bb1[i],aa1[i])
+    eR0 = B3$Buy*B3$Rev
+    eR1 = (B3$Buy+dp) * (B3$Rev+B3$Rev*dr)
+    eR = (eR1 - eR0)*margin - x*(B3$Buy+dp)
+    c(i=i, x=x, eR.Do=sum(eR) )
+    }) %>% t %>% data.frame
+  }))
+df %>% 
+  mutate_at(vars(eR.Do), function(y) round(y/1000)) %>% 
+  gather('key','value',-i,-x) %>% 
+  mutate(Instrument = paste0('I',i)) %>%
+  ggplot(aes(x=x, y=value, col=Instrument)) + 
+  geom_hline(yintercept=0, linetype='dashed', col='blue') +
+  geom_line(size=1.5,alpha=0.5) + 
+  xlab('工具選項(成本)') + ylab('預期報償(K)') + 
+  ggtitle('行銷工具優化','假設行銷工具的效果是其成本的函數') +
+    facet_wrap(~key,ncol=1,scales='free_y') + theme_bw() -> p
+
+plotly::ggplotly(p)
+```
+
+<br>
+
+##### 成本效益總覽
+```{r}
+group_by(df,i) %>% top_n(1,eR.Do)
+```
+<br>
+
+##### 最佳參數設定
+```{r}
+m=0.2; b=25; a=15
+m1=0.2;b1= 15 ;a1=5
+X = seq(0,120,1) 
+margin = 0.151
+df = sapply(X, function(x) {
+  dp = pmin(DP(x,m,b,a),1-B3$Buy)
+  dr = DR(x,m1,b1,a1)
+  eR0 = B3$Buy*B3$Rev
+  eR1 = (B3$Buy+dp) * (B3$Rev+B3$Rev*dr)
+  eR = (eR1 - eR0)*margin - x*(B3$Buy+dp)
+  c(x=x,eReturn=sum(eR))
+  }) %>% t %>% data.frame %>% 
+  gather('key','value',-x)
+
+df %>% ggplot(aes(x=x, y=value, col=key)) + 
+  geom_hline(yintercept=0,linetype='dashed') +
+  geom_line(size=1.5,alpha=0.5) + 
+  facet_wrap(~key,ncol=1,scales='free_y') + theme_bw()
+```
+<br>
+
+### 退休人士(第四群顧客)
+<br>
+
+##### 比較不同行銷工具的淨預期報酬
+```{r warning=F, fig.height=8, fig.width=8}
+mm=c(0.1, 0.05)
+bb=c(  3,  5)
+aa=c(  2,   3) 
+X = seq(0,120,1) 
+
+mm1=c(0.1, 0.2)
+bb1=c(  25,  30)
+aa1=c(  5,   8) 
+margin = 0.149
+X = seq(15, 120, 1)
+i=1;
+eR4_sum = sum(B4$Buy*B4$Rev) *margin
+df = do.call(rbind, lapply(1:length(mm), function(i) {
+  sapply(X, function(x) {
+    dp = pmin(1-B4$Buy, DP(x,mm[i],bb[i],aa[i]))
+    dr = DR(x,mm1[i],bb1[i],aa1[i])
+    eR0 = B4$Buy*B4$Rev
+    eR1 = (B4$Buy+dp) * (B4$Rev+B4$Rev*dr)
+    eR = (eR1 - eR0)*margin - x*(B4$Buy+dp)
+    c(i=i, x=x, eR.Do=sum(eR) )
+    }) %>% t %>% data.frame
+  }))
+df %>% 
+  mutate_at(vars(eR.Do), function(y) round(y/1000)) %>% 
+  gather('key','value',-i,-x) %>% 
+  mutate(Instrument = paste0('I',i)) %>%
+  ggplot(aes(x=x, y=value, col=Instrument)) + 
+  geom_hline(yintercept=0, linetype='dashed', col='blue') +
+  geom_line(size=1.5,alpha=0.5) + 
+  xlab('工具選項(成本)') + ylab('預期報償(K)') + 
+  ggtitle('行銷工具優化','假設行銷工具的效果是其成本的函數') +
+    facet_wrap(~key,ncol=1,scales='free_y') + theme_bw() -> p
+
+plotly::ggplotly(p)
+```
+<br>
+
+##### 成本效益總覽
+```{r}
+group_by(df,i) %>% top_n(1,eR.Do)
+```
+<br>
+
+##### 最佳參數設定
+```{r}
+margin=0.149
+m = 0.05; b = 5; a = 3; X = seq(15,100,1)
+m1 = 0.2; b1=30; a1=8
+eR4_sum = sum(B4$Buy*B4$Rev) *margin
+df = sapply(X, function(x) {
+  dp = pmin(DP(x,m,b,a),1-B4$Buy)
+  dr = DR(x,m1,b1,a1)
+  eR0 = B4$Buy*B4$Rev
+  eR1 = (B4$Buy+dp) * (B4$Rev+B4$Rev*dr)
+  eR = (eR1 - eR0)*margin - x*(B4$Buy+dp)
+  c(x=x,eReturn=sum(eR))
+  }) %>% t %>% data.frame %>% 
+  gather('key','value',-x)
+
+df %>% ggplot(aes(x=x, y=value, col=key)) + 
+  geom_hline(yintercept=0,linetype='dashed') +
+  geom_line(size=1.5,alpha=0.5) + 
+  facet_wrap(~key,ncol=1,scales='free_y') + theme_bw()
+```
+
+
+
+
+

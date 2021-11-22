@@ -1,0 +1,210 @@
+---
+title: 資料探索與分析
+author: G14
+date: "`r Sys.time()`"
+output:
+  html_document:
+    highlight: pygments
+    theme: flatly
+    css: ../etc/style.css
+---
+
+<br>
+```{r echo=T, message=F, cache=F, warning=F}
+rm(list=ls(all=TRUE))
+library(d3heatmap)
+pacman::p_load(Matrix, vcd, magrittr, readr, caTools, ggplot2, dplyr)#載入套件
+load("final_data/C_TRA.rdata")#導入資料
+```
+<br>
+
+### 整體顧客分析
+<br>
+
+##### 整體顧客地理位置分布
+```{r}
+tapply(C$rev,C$area,sum) %>% prop.table() %>% barplot()
+#從獲利貢獻圖中發現，z115、z221兩個地區就貢獻大部分的營收(65%)
+```
+<br>
+
+##### 整體顧客年齡分布
+```{r}
+tapply(C$rev,C$age,sum) %>% prop.table() %>% barplot() #30歲到49歲為主力顧客
+```
+<br>
+
+### 南港、汐止顧客分析
+<br>
+
+##### 兩地區交易時間分析
+```{r}
+TA_RR <- TA %>% filter(area =="z115" | area =="z221")
+#根據115.221兩地區交易時間進行分析 可以看出該兩區交易熱點集中於1-2月 
+TA_RR %>%
+  group_by(area, date) %>%
+  summarize(num_tran = n()) %>% 
+  ggplot(aes(x = date, y = num_tran)) + 
+  geom_bar(aes(x = date, y = num_tran, color = area), stat = "identity", alpha = 0.8) +
+  facet_wrap(~area) + 
+  labs(y = "# Transactions", x = "Date")
+```
+<br>
+
+##### 兩地區各年齡層週間消費情況
+```{r}
+TRA$wday = format(TRA$date, "%u")
+TRA_R = TRA %>% filter(area=="z115" | area == "z221")
+MOSA = function(formula, data) mosaic(formula, data, shade=T, 
+  margins=c(0,1,0,0), labeling_args = list(rot_labels=c(90,0,0,0)),
+  gp_labels=gpar(fontsize=9), legend_args=list(fontsize=9),
+  gp_text=gpar(fontsize=7),labeling=labeling_residuals)#
+MOSA(~wday+age, TRA_R) 
+#29歲以下與50歲以上較常在平日消費，30~49歲則喜歡在週末消費。
+```
+<br>
+
+### 顧客分群
+<br>
+
+##### 兩地區的顧客從顧客購買習慣做分群(freq,recent,senior,money)
+```{r}
+CR <- C %>% filter(area =="z115" | area =="z221")
+set.seed(111)
+CR$grp = kmeans(scale(CR[,c(2,3,4,5)]),4)$cluster #分成5群 ，以r,f,m,rev為變數
+table(CR$grp)  # 族群大小
+#集群式分析k-means
+```
+<br>
+
+##### CR資料標準化
+```{r}
+CN = scale(CR[c(2:7)]) %>% data.frame
+sapply(split(CN,CR$grp), colMeans) %>% round(2) 
+```
+<br>
+
+##### 四群顧客直條圖分佈
+```{r}
+par(cex=0.8)
+split(CN,CR$grp) %>% sapply(colMeans) %>% barplot(beside=T,col=rainbow(6))
+legend('topright',legend=colnames(CN),fill=rainbow(6))
+```
+<br>
+
+##### 泡泡圖呈現
+```{r}
+group_by(CR,grp) %>% summarise(
+  recent=mean(r),
+  senior=mean(s),
+  freq=mean(f),
+  avg.Revenue = sum(f*m)/sum(f),
+  money=round(mean(m), digits=0),
+  size=n(),
+  revenue=mean(rev)) %>% 
+  ggplot(aes(x=avg.Revenue, y=freq)) +
+  geom_point(aes(size=revenue, col=recent),alpha=0.5) +
+  scale_size(range=c(4,30)) +
+  scale_color_gradient(low="green",high="red") +
+  geom_text(aes(label = size ),size=3) +
+  theme_bw() + guides(size=F) +
+  labs(title="Customer Segements",
+       subtitle="(bubble_size:revenue_contribution; text:group_size)",
+       color="recent") +
+  xlab("money") + ylab("freq")
+#泡泡圖的數字代表該族群人數，泡泡大小代表群中每個人的平均營收貢獻，Ｘ軸代表平均客單價，Y軸代表光顧商店的頻率。
+```
+<br>
+
+### 各客群購物分析
+<br>
+
+##### 馬賽克圖呈現族群年齡分佈
+```{r}
+MOSA(~grp+age, CR) #第一族群大多落在34-44歲之間，第二、三族群29歲以下年輕人比例較高，第四族群老年人比例較高。
+```
+<br>
+
+##### 族群週間消費情況
+```{r}
+CR_grp = CR[c(1,10)]
+TRA_M_C <- merge(TRA_R,CR_grp,by="cust",all = T)
+MOSA(~grp+wday, TRA_M_C)#從族群和消費習慣的相關性我們可以發現壯年人口習慣在假日購物，老年人則習慣在平日購物。
+```
+<br>
+
+### 顧客消費產品類型分析
+<br>
+
+##### 各族群在商店十大熱銷商品的消費情況
+```{r fig.height=6, fig.width=8}
+top10 = tapply(TA$qty,TA$cat,sum) %>% sort %>% tail(10) %>% names
+TA_R = TA %>% filter(area=="z115" | area == "z221")
+TA_M_C <- merge(TA_R,CR_grp,by="cust",all = T)
+MOSA(~grp+cat, TA_M_C[TA_M_C$cat %in% top10,])
+#我們發現有集中消費某幾樣商品的趨勢,因此我們在後面的客群購物分析中,將會針對這些族群偏好的商品進行個別分析及策略擬定。
+```
+<br>
+
+##### 商店最熱銷五大商品在週間銷售情況
+```{r}
+top5 = tapply(TA$qty,TA$cat,sum) %>% sort %>% tail(5) %>% names
+TA_top5 <- filter(TA, cat %in% top5)
+table(TA_top5$cat , format(TA_top5$date, "%u")) %>%
+  {./rowSums(.)} %>%
+  as.data.frame.matrix() %>%
+  d3heatmap(F,F, col = colorRamp(c("seagreen", "lightyellow", "red")))#熱門商品的銷售均集中於星期日
+```
+<br>
+
+### 資料彙整
+```{r fig.height=4, fig.width=10}
+TA_M_C$gross = TA_M_C$price-TA_M_C$cost
+TA_M_C$margin = TA_M_C$gross/TA_M_C$price
+```
+
+```{r fig.height=4, fig.width=8}
+grp1 <- TA_M_C %>% filter(grp == 1) 
+top5_grp1 = tapply(grp1$margin,grp1$cat,sum) %>% sort %>% tail(5) %>% names()
+grp1 = grp1 %>% filter(cat %in% top5_grp1) 
+grp2 <- TA_M_C %>% filter(grp == 2) 
+top5_grp2 = tapply(grp2$qty,grp2$cat,sum) %>% sort %>% tail(5) %>% names()
+grp2 = grp2 %>% filter(cat %in% top5_grp2) 
+```
+
+```{r fig.height=4, fig.width=8}
+grp3 <- TA_M_C %>% filter(grp == 3) 
+top5_grp3 = tapply(grp3$qty,grp3$cat,sum) %>% sort %>% tail(5) %>% names()
+grp3 = grp3 %>% filter(cat %in% top5_grp3) 
+grp4 <- TA_M_C %>% filter(grp == 4) 
+top5_grp4 = tapply(grp4$qty,grp4$cat,sum) %>% sort %>% tail(5) %>% names()
+grp4 = grp4 %>% filter(cat %in% top5_grp4) 
+```
+<br>
+
+##### 各品類統整
+```{r}
+G = TA %>% group_by(cat) %>% summarise(
+  cat = min(cat),
+  qty = sum(qty),
+  avgprice = mean(price),
+  totalrev = sum(price),
+  gross = sum(price-cost),
+  margin = gross/totalrev
+) %>% data.frame
+```
+<br>
+
+### 各族群購買數量最多的前五大商品，其商品營收、毛利分析
+```{r}
+G %>% filter(cat %in% top5_grp1) 
+G %>% filter(cat %in% top5_grp2)
+G %>% filter(cat %in% top5_grp3)
+G %>% filter(cat %in% top5_grp4) 
+```
+
+```{r}
+save(CR,G,TA_M_C,TRA_M_C, file="final_data/Analyze.rdata")
+```
+
+
